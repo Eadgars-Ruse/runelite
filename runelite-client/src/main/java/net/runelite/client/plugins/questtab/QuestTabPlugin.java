@@ -42,7 +42,6 @@ import net.runelite.api.events.ConfigChanged;
 import net.runelite.api.events.MenuEntryAdded;
 import net.runelite.api.events.MenuOptionClicked;
 import net.runelite.api.events.PlayerMenuOptionClicked;
-import net.runelite.api.events.ScriptCallbackEvent;
 import net.runelite.api.events.WidgetLoaded;
 import net.runelite.api.widgets.Widget;
 import net.runelite.api.widgets.WidgetID;
@@ -94,13 +93,20 @@ public class QuestTabPlugin extends Plugin
 	@Getter
 	private HashMap<Quest, QuestStatus> questStatus = new HashMap<>();
 
-	private LinkedHashMap<Quest, Widget> freeWidgets = new LinkedHashMap<>();
-	private LinkedHashMap<Quest, Widget> membersWidgets = new LinkedHashMap<>();
-	private LinkedHashMap<Quest, Widget> miniquestWidgets = new LinkedHashMap<>();
+	private LinkedHashMap<Widget, Quest> freeWidgets = new LinkedHashMap<>();
+	private LinkedHashMap<Widget, Quest> membersWidgets = new LinkedHashMap<>();
+	private LinkedHashMap<Widget, Quest> miniquestWidgets = new LinkedHashMap<>();
 
 	private static final String CONFIG_GROUP = "questtab";
+
 	private static final int QUEST_LIST_TITLE_SPACE = 20;
 	private static final int QUEST_LIST_ITEM_SPACE = 15;
+	private static final int QUEST_LIST_TOP_PADDING = 10;
+	private static final int QUEST_LIST_BOTTOM_PADDING = 8;
+
+	private static final int COMPLETE_COLOR = 901389;
+	private static final int IN_PROGRESS_COLOR = 16776960;
+	private static final int NOT_STARTED_COLOR = 16711680;
 
 	private static final String SHOW_FREE = "Show Free";
 	private static final String SHOW_MEMBERS = "Show Members";
@@ -171,60 +177,165 @@ public class QuestTabPlugin extends Plugin
 			event.getWidgetId() == WidgetInfo.RESIZABLE_VIEWPORT_QUESTS_TAB.getId() ||
 			event.getWidgetId() == WidgetInfo.RESIZABLE_VIEWPORT_BOTTOM_LINE_QUEST_TAB.getId())
 		{
+			clientThread.invokeLater(() -> client.runScript(
+				ScriptID.QUEST_LIST_INIT,
+				WidgetInfo.QUEST_LIST_CONTROL.getId(),
+				WidgetInfo.QUEST_LIST_LISTS.getId(),
+				WidgetInfo.QUEST_LIST_SCROLLBAR.getId(),
+				WidgetInfo.QUEST_LIST_QP.getId(),
+				WidgetInfo.QUEST_LIST_FREE.getId(),
+				WidgetInfo.QUEST_LIST_MEMBERS.getId(),
+				WidgetInfo.QUEST_LIST_MINIQUESTS.getId()
+			));
 			clientThread.invokeLater(this::processQuestList);
 		}
 	}
 
 	private void processQuestList()
 	{
+		int overallYpos = QUEST_LIST_TOP_PADDING;
 		freeWidgets.clear();
-		processQuestSection(WidgetInfo.QUEST_LIST_FREE, freeWidgets);
+
+		if (config.hideFree())
+		{
+			hideListItems(WidgetInfo.QUEST_LIST_FREE);
+		}
+		else
+		{
+			showListItems(WidgetInfo.QUEST_LIST_FREE, freeWidgets);
+			freeWidgets = sortListItems(WidgetInfo.QUEST_LIST_FREE, freeWidgets);
+			overallYpos = processQuestListItems(WidgetInfo.QUEST_LIST_FREE, freeWidgets, overallYpos);
+			overallYpos += QUEST_LIST_BOTTOM_PADDING;
+		}
 
 		membersWidgets.clear();
-		processQuestSection(WidgetInfo.QUEST_LIST_MEMBERS, membersWidgets);
+
+		if (config.hideMembers())
+		{
+			hideListItems(WidgetInfo.QUEST_LIST_MEMBERS);
+		}
+		else
+		{
+			showListItems(WidgetInfo.QUEST_LIST_MEMBERS, membersWidgets);
+			membersWidgets = sortListItems(WidgetInfo.QUEST_LIST_MEMBERS, membersWidgets);
+			overallYpos = processQuestListItems(WidgetInfo.QUEST_LIST_MEMBERS, membersWidgets, overallYpos);
+		}
 
 		miniquestWidgets.clear();
-		processQuestSection(WidgetInfo.QUEST_LIST_MINIQUESTS, miniquestWidgets);
+
+		if (config.hideMiniquests())
+		{
+			hideListItems(WidgetInfo.QUEST_LIST_MINIQUESTS);
+		}
+		else
+		{
+			showListItems(WidgetInfo.QUEST_LIST_MINIQUESTS, miniquestWidgets);
+			miniquestWidgets = sortListItems(WidgetInfo.QUEST_LIST_MINIQUESTS, miniquestWidgets);
+			overallYpos = processQuestListItems(WidgetInfo.QUEST_LIST_MINIQUESTS, miniquestWidgets, overallYpos);
+		}
+
 	}
 
-	private void processQuestSection(WidgetInfo wi, LinkedHashMap<Quest, Widget> widgetList)
+	private void hideListItems(WidgetInfo wi)
+	{
+		client.getWidget(wi).setHidden(true);
+
+		for (Widget w : client.getWidget(wi).getChildren())
+		{
+			w.setHidden(true);
+		}
+	}
+
+	private void showListItems(WidgetInfo wi, LinkedHashMap<Widget, Quest> widgetList)
+	{
+		client.getWidget(wi).setHidden(false);
+
+		for (Widget w : client.getWidget(wi).getChildren())
+		{
+			w.setHidden(false);
+
+			String widgetText = w.getText();
+
+			// remove any additions that was previously added
+			if (w.getText().contains(">"))
+			{
+				widgetText = widgetText.substring(widgetText.lastIndexOf(">") + 2, widgetText.length());
+				w.setText(widgetText);
+			}
+
+			Quest q = Quest.getQuest(w.getText());
+
+			if (q != null)
+			{
+				widgetList.put(w, q);
+			}
+			// in case a new quest is added but it is not yet recognized by the Quest class
+			// !w.getName().equals("") prevents quest list titles (Free, Members', Miniquests) from getting through
+			else if (!w.getName().equals(""))
+			{
+				widgetList.put(w, Quest.UNKNOWN);
+			}
+		}
+	}
+
+	private int processQuestListItems(WidgetInfo wi, LinkedHashMap<Widget, Quest> widgetList, int overallYpos)
 	{
 		if (client.getWidget(wi) != null && client.getWidget(wi).getChildren() != null)
 		{
-			for (Widget w : client.getWidget(wi).getChildren())
+			client.getWidget(wi).setOriginalY(overallYpos);
+			client.getWidget(wi).setRelativeY(overallYpos);
+			overallYpos += QUEST_LIST_TITLE_SPACE;
+			int listItemYpos = QUEST_LIST_TITLE_SPACE;
+
+			for (Widget w : widgetList.keySet())
 			{
-				if (w.isHidden())
+				if (w != null && widgetList.get(w) != null)
 				{
-					continue;
-				}
+					Quest q = widgetList.get(w);
 
-				Quest q = Quest.getQuest(w.getText());
-
-				if (q != null)
-				{
-					widgetList.put(q, w);
+					if (filterQuest(q, w))
+					{
+						w.setHidden(true);
+					}
+					else
+					{
+						w.setOriginalY(listItemYpos);
+						w.setRelativeY(listItemYpos);
+						listItemYpos += QUEST_LIST_ITEM_SPACE;
+						overallYpos += QUEST_LIST_ITEM_SPACE;
+					}
 
 					if (config.showLength() || config.showDifficulty())
 					{
 						updateText(q, w);
 					}
 				}
-				// in case a new quest is added but it is not yet recognized by the Quest class
-				// !w.getName().equals("") prevents quest list titles (Free, Members', Miniquests) from getting through
-				// !w.getText().startsWith("<") prevents quests which have already been processed by updateText() from getting through
-				else if (!w.getName().equals("") && !w.getText().startsWith("<"))
-				{
-					// declare the quest as an unknown quest and continue with the processing
-					widgetList.put(Quest.UNKNOWN, w);
-
-					if (config.showLength() || config.showDifficulty())
-					{
-						updateText(Quest.UNKNOWN, w);
-					}
-				}
 			}
 		}
 
+		return overallYpos;
+	}
+
+	private boolean filterQuest(Quest q, Widget w)
+	{
+		switch (w.getTextColor())
+		{
+			case COMPLETE_COLOR:
+				if (config.hideCompleted()) return true;
+				break;
+			case IN_PROGRESS_COLOR:
+				if (config.hideInProgress()) return true;
+				break;
+			case NOT_STARTED_COLOR:
+				if (config.hideNotStarted()) return true;
+				break;
+		}
+
+		return config.hideCantDo() && !q.getQuestRequirement().isMet(this, client);
+	}
+
+	private LinkedHashMap<Widget, Quest> sortListItems(WidgetInfo wi, LinkedHashMap<Widget, Quest> widgetList)
+	{
 		// alphabetical is natural quest list sort order
 		// sorting alphabetically first will keep quest list order natural with respect to any other sorts
 		widgetList = sortQuest(widgetList, SortType.ALPHABETICAL);
@@ -241,6 +352,7 @@ public class QuestTabPlugin extends Plugin
 			rearrangeWidgets(widgetList);
 		}
 
+		return widgetList;
 	}
 
 	private void updateText(Quest q, Widget w)
@@ -302,11 +414,11 @@ public class QuestTabPlugin extends Plugin
 		w.setText(s.toString());
 	}
 
-	private void rearrangeWidgets(LinkedHashMap<Quest, Widget> l)
+	private void rearrangeWidgets(LinkedHashMap<Widget, Quest> l)
 	{
 		int yPos = QUEST_LIST_TITLE_SPACE;
 
-		for (Widget w : l.values())
+		for (Widget w : l.keySet())
 		{
 			w.setRelativeY(yPos);
 			w.setOriginalY(yPos);
@@ -314,27 +426,27 @@ public class QuestTabPlugin extends Plugin
 		}
 	}
 
-	private static LinkedHashMap<Quest, Widget> sortQuest(HashMap<Quest, Widget> unsortedQuest, SortType s)
+	private static LinkedHashMap<Widget, Quest> sortQuest(HashMap<Widget, Quest> unsortedQuest, SortType s)
 	{
-		List<HashMap.Entry<Quest, Widget>> list = new ArrayList<>(unsortedQuest.entrySet());
+		List<HashMap.Entry<Widget, Quest>> list = new ArrayList<>(unsortedQuest.entrySet());
 
 		switch (s)
 		{
 			case ALPHABETICAL:
 				// natural order is alphabetical, so sorting by relative y preserves natural/alphabetical order
-				list.sort(Comparator.comparing(a -> a.getValue().getRelativeY()));
+				list.sort(Comparator.comparing(a -> a.getKey().getRelativeY()));
 				break;
 			case DIFFICULTY:
-				list.sort(Comparator.comparing(a -> a.getKey().getQuestDifficulty()));
+				list.sort(Comparator.comparing(a -> a.getValue().getQuestDifficulty()));
 				break;
 			case LENGTH:
-				list.sort(Comparator.comparing(a -> a.getKey().getQuestLength()));
+				list.sort(Comparator.comparing(a -> a.getValue().getQuestLength()));
 				break;
 		}
 
-		LinkedHashMap<Quest, Widget> result = new LinkedHashMap<>();
+		LinkedHashMap<Widget, Quest> result = new LinkedHashMap<>();
 
-		for (HashMap.Entry<Quest, Widget> entry : list)
+		for (HashMap.Entry<Widget, Quest> entry : list)
 		{
 			result.put(entry.getKey(), entry.getValue());
 		}
@@ -483,131 +595,6 @@ public class QuestTabPlugin extends Plugin
 			case RESET:
 				configManager.setDefaultConfiguration(config, true);
 				break;
-		}
-	}
-
-	@Subscribe
-	public void onScriptEvent(ScriptCallbackEvent event)
-	{
-		String eventName = event.getEventName();
-		int[] intStack = client.getIntStack();
-		int intStackSize = client.getIntStackSize();
-		String[] stringStack = client.getStringStack();
-		int stringStackSize = client.getStringStackSize();
-
-		switch (eventName)
-		{
-			case "questListFilter":
-
-				if (intStackSize < 3)
-				{
-					break;
-				}
-
-				String questName = null;
-				Quest quest = null;
-
-				if (stringStackSize > 0)
-				{
-					questName = stringStack[stringStackSize - 1];
-					quest = Quest.getQuest(questName);
-				}
-
-				// order matters for these calls as filterOnProgress initializes a return value
-				// and the following calls maintain or update the value that was set
-				filterOnProgress(quest, questName, intStack, intStackSize);
-				filterOnQuestType(intStack, intStackSize);
-				filterOnQuestReqsMet(quest, questName, intStack, intStackSize);
-
-				// the second value on the int stack will be used as (true) once the script continues
-				intStack[intStackSize - 2] = 1;
-				break;
-			case "questListSetupDone":
-				filterList(intStack, intStackSize);
-				break;
-		}
-	}
-
-	private void filterOnProgress(Quest quest, String questName, int[] intStack, int intStackSize)
-	{
-		int progress = intStack[intStackSize - 3];
-
-		// progress == 2 means completed
-		if (progress == 2)
-		{
-			if (questName != null)
-			{
-				questStatus.put(quest, QuestStatus.COMPLETE);
-			}
-
-			intStack[intStackSize - 1] = config.hideCompleted() ? 1 : 0;
-		}
-		// progress == 0 means in progress
-		else if (progress == 0)
-		{
-			if (questName != null)
-			{
-				questStatus.put(quest, QuestStatus.IN_PROGRESS);
-			}
-
-			intStack[intStackSize - 1] = config.hideInProgress() ? 1 : 0;
-		}
-		// progress == 1 means not started
-		else if (progress == 1)
-		{
-			if (questName != null)
-			{
-				questStatus.put(quest, QuestStatus.NOT_STARTED);
-			}
-
-			intStack[intStackSize - 1] = config.hideNotStarted() ? 1 : 0;
-		}
-	}
-
-	private void filterOnQuestType(int[] intStack, int intStackSize)
-	{
-		int questListWidgetId = intStack[intStackSize - 2];
-
-		if (questListWidgetId == WidgetInfo.QUEST_LIST_FREE.getId())
-		{
-			intStack[intStackSize - 1] = config.hideFree() ? 1 : intStack[intStackSize - 1];
-		}
-		else if (questListWidgetId == WidgetInfo.QUEST_LIST_MEMBERS.getId())
-		{
-			intStack[intStackSize - 1] = config.hideMembers() ? 1 : intStack[intStackSize - 1];
-		}
-		else if (questListWidgetId == WidgetInfo.QUEST_LIST_MINIQUESTS.getId())
-		{
-			intStack[intStackSize - 1] = config.hideMiniquests() ? 1 : intStack[intStackSize - 1];
-		}
-	}
-
-	private void filterOnQuestReqsMet(Quest quest, String questName, int[] intStack, int intStackSize)
-	{
-		if (config.hideCantDo() && questName != null && !questStatus.get(quest).equals(QuestStatus.COMPLETE))
-		{
-			intStack[intStackSize - 1] = !quest.getQuestRequirement().isMet(this, client) ? 1 : intStack[intStackSize - 1];
-		}
-	}
-
-	private void filterList(int[] intStack, int intStackSize)
-	{
-		int questListWidgetId = intStack[intStackSize - 1];
-
-		if (questListWidgetId == WidgetInfo.QUEST_LIST_FREE.getId())
-		{
-			intStack[intStackSize - 1] = config.hideFree() ? 1 : intStack[intStackSize - 1];
-			intStack[intStackSize - 3] = -8;
-		}
-		else if (questListWidgetId == WidgetInfo.QUEST_LIST_MEMBERS.getId())
-		{
-			intStack[intStackSize - 1] = config.hideMembers() ? 1 : intStack[intStackSize - 1];
-			intStack[intStackSize - 3] = -8;
-		}
-		else if (questListWidgetId == WidgetInfo.QUEST_LIST_MINIQUESTS.getId())
-		{
-			intStack[intStackSize - 1] = config.hideMiniquests() ? 1 : intStack[intStackSize - 1];
-			intStack[intStackSize - 3] = 0;
 		}
 	}
 
